@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -12,7 +13,7 @@ import (
 	"github.com/operator-framework/deppy/internal/sat"
 )
 
-func TestSource(t *testing.T) {
+func TestConstraints(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Constraints Suite")
 }
@@ -76,7 +77,6 @@ var _ = Describe("Constraints", func() {
 				expectedIdentifier := fmt.Sprintf("require-%s-%s-%s", reqPkg.packageName, reqPkg.versionRange, reqPkg.channel)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(vars).Should(HaveLen(1))
-				Expect(vars[0]).NotTo(BeNil())
 				Expect(vars[0].Identifier().String()).To(Equal(expectedIdentifier))
 				Expect(vars[0].Constraints()).Should(HaveLen(2))
 				Expect(vars[0].Constraints()[0].String(sat.IdentifierFromString(expectedIdentifier))).To(
@@ -108,7 +108,6 @@ var _ = Describe("Constraints", func() {
 				vars, err := reqPkg.GetVariables(ctx, mockQuerier)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(vars).Should(HaveLen(1))
-				Expect(vars[0]).NotTo(BeNil())
 				Expect(vars[0].Identifier().String()).To(Equal(fmt.Sprintf("require-%s-%s-%s", expPackageName, expVersionRange, expChannel)))
 			})
 		})
@@ -145,13 +144,14 @@ var _ = Describe("Constraints", func() {
 				vars, err := GVKUniqueness().GetVariables(ctx, mockQuerier)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(vars).Should(HaveLen(len(entityListMap)))
-				// TODO order of these is random
+				// Not necessarily returned in order - sort for consistency
+				sort.Slice(vars, func(i, j int) bool {
+					return vars[i].Identifier().String() < vars[j].Identifier().String()
+				})
 				Expect(vars[0].Identifier().String()).To(Equal("entity-list-1 uniqueness"))
-				Expect(vars[0].Constraints()[0].String("entity-1")).To(Equal("entity-1 permits at most 1 of entity-1"))
-				Expect(vars[0].Constraints()[0].String("entity-list-1")).To(Equal("entity-list-1 permits at most 1 of entity-1"))
+				Expect(vars[0].Constraints()[0].String("custom-entity")).To(Equal("custom-entity permits at most 1 of entity-1"))
 				Expect(vars[1].Identifier().String()).To(Equal("entity-list-2 uniqueness"))
-				Expect(vars[1].Constraints()[0].String("entity-2")).To(Equal("entity-2 permits at most 1 of entity-2"))
-				Expect(vars[1].Constraints()[0].String("entity-list-2")).To(Equal("entity-list-2 permits at most 1 of entity-2"))
+				Expect(vars[1].Constraints()[0].String("custom-entity")).To(Equal("custom-entity permits at most 1 of entity-2"))
 			})
 			It("forwards any errors from EntityQuerier", func() {
 				mockQuerier = MockQuerier{
@@ -164,62 +164,51 @@ var _ = Describe("Constraints", func() {
 				Expect(vars).Should(HaveLen(0))
 			})
 		})
-		Describe("gvkGroupFunction", func() {
-			It("returns a string slice with an entry containing the group, version, and kind delimited by '/'", func() {
-				entity := entitysource.NewEntity(
-					"my-entity",
-					map[string]string{
-						propertyOLMGVK: "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
-					},
-				)
-				ret := gvkGroupFunction(entity)
-				Expect(ret).Should(HaveLen(1))
-				Expect(ret[0]).To(Equal("my-group/my-version/my-kind"))
-			})
-			It("returns nothing and does not panic when gvk passed is not parseable as json", func() {
-				entity := entitysource.NewEntity(
-					"my-entity",
-					map[string]string{
-						propertyOLMGVK: "what will come back I wonder",
-					},
-				)
-				ret := gvkGroupFunction(entity)
-				Expect(ret).Should(HaveLen(0))
-			})
-			It("returns nothing when 'olm.gvk' key is missing", func() {
-				entity := entitysource.NewEntity(
-					"my-entity",
-					map[string]string{
-						"made-up-key": "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
-					},
-				)
-				ret := gvkGroupFunction(entity)
-				Expect(ret).Should(HaveLen(0))
-			})
-		})
-		Describe("packageGroupFunction", func() {
-			It("returns a string slice containing a single entry with the package name", func() {
-				entity := entitysource.NewEntity(
-					"my-entity",
-					map[string]string{
-						propertyOLMPackageName: "my-cool-package",
-					},
-				)
-				ret := packageGroupFunction(entity)
-				Expect(ret).Should(HaveLen(1))
-				Expect(ret[0]).To(Equal("my-cool-package"))
-			})
-			It("returns an empty string slice when 'olm.packageName' key is missing", func() {
-				entity := entitysource.NewEntity(
-					"my-entity",
-					map[string]string{
-						"some-key": "my-cool-package",
-					},
-				)
-				ret := packageGroupFunction(entity)
-				Expect(ret).Should(HaveLen(0))
-			})
-		})
+		DescribeTable("gvkGroupFunction", func(gvkJson string, gvkKey string, expReturn []string) {
+			entity := entitysource.NewEntity(
+				"my-entity",
+				map[string]string{
+					gvkKey: gvkJson,
+				},
+			)
+			ret := gvkGroupFunction(entity)
+			Expect(ret).Should(HaveLen(len(expReturn)))
+			for i, gvk := range ret {
+				Expect(gvk).To(Equal(expReturn[i]))
+			}
+		},
+			Entry("returns a string slice with an entry containing the group, version, and kind delimited by '/'",
+				"{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
+				propertyOLMGVK,
+				[]string{"my-group/my-version/my-kind"},
+			),
+			Entry("returns nothing and does not panic when gvk passed is not parseable as json",
+				"what will come back I wonder",
+				propertyOLMGVK,
+				[]string{},
+			),
+			Entry("returns nothing when 'olm.gvk' key is missing",
+				"{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
+				"irrelevant-key",
+				[]string{},
+			),
+		)
+		DescribeTable("packageGroupFunction", func(packageName string, packageKey string, expReturn []string) {
+			entity := entitysource.NewEntity(
+				"my-entity",
+				map[string]string{
+					packageKey: packageName,
+				},
+			)
+			ret := packageGroupFunction(entity)
+			Expect(ret).Should(HaveLen(len(expReturn)))
+			for i, pkg := range ret {
+				Expect(pkg).To(Equal(expReturn[i]))
+			}
+		},
+			Entry("returns a string slice containing a single entry with the package name", "my-cool-package", propertyOLMPackageName, []string{"my-cool-package"}),
+			Entry("returns an empty string slice when 'olm.packageName' key is missing", "my-cool-package", "irrelevant-key", []string{}),
+		)
 	})
 	Context("packageDependency", func() {
 		Describe("GetVariables", func() {
@@ -320,7 +309,7 @@ var _ = Describe("Constraints", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(vars).To(HaveLen(1))
 				Expect(vars[0].Identifier().String()).To(Equal("my-subject"))
-				Expect(vars[0].Constraints()[0].String("package")).To(Equal("package requires at least one of entity-1"))
+				Expect(vars[0].Constraints()[0].String("a-package")).To(Equal("a-package requires at least one of entity-1"))
 			})
 			It("forwards any error from the entity querier", func() {
 				mockQuerier = MockQuerier{
@@ -395,18 +384,20 @@ var _ = Describe("Constraints", func() {
 			Entry("gives true result when provided with empty channel", "", propertyOLMChannel, true),
 			Entry("gives false result when 'olm.channel' key is missing from entity", "a-channel", "irrelevant-key", false),
 		)
-		DescribeTable("withExportsGVK", func(group string, gvkKey string, expReturn bool) {
+		DescribeTable("withExportsGVK", func(group string, version string, kind string, gvkKey string, expReturn bool) {
 			propertiesMap := map[string]string{
 				gvkKey: "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
 			}
 			entity := entitysource.NewEntity("e1", propertiesMap)
-			pred := withExportsGVK(group, "my-version", "my-kind")
+			pred := withExportsGVK(group, version, kind)
 			result := pred(entity)
 			Expect(result).To(Equal(expReturn))
 		},
-			Entry("gives true result when provided group, version, and kind match that in the entity json", "my-group", propertyOLMGVK, true),
-			Entry("gives false result when group does not match that in entity json", "my-other-group", propertyOLMGVK, false),
-			Entry("gives false result when 'olm.gvk' key is missing from entity", "my-group", "irrelevant-key", false),
+			Entry("gives true result when provided group, version, and kind match that in the entity json", "my-group", "my-version", "my-kind", propertyOLMGVK, true),
+			Entry("gives false result when group does not match that in entity json", "my-other-group", "my-version", "my-kind", propertyOLMGVK, false),
+			Entry("gives false result when version does not match that in entity json", "my-group", "my-other-version", "my-kind", propertyOLMGVK, false),
+			Entry("gives false result when kind does not match that in entity json", "my-group", "my-version", "my-other-kind", propertyOLMGVK, false),
+			Entry("gives false result when 'olm.gvk' key is missing from entity", "my-group", "my-version", "my-kind", "irrelevant-key", false),
 		)
 	})
 	Context("byChannelAndVersion", func() {
@@ -423,9 +414,9 @@ var _ = Describe("Constraints", func() {
 			e2 := entitysource.NewEntity("e2", e2Map)
 			Expect(byChannelAndVersion(e1, e2)).To(Equal(expReturn))
 		},
-			Entry("Returns false when e1 package name is missing", "", "", false),
-			Entry("Returns true when e2 package name is missing", "p1", "", true),
-			Entry("Returns true when e2 package name is >= e1 package name", "p1", "p2", true),
+			Entry("returns false when e1 package name is missing", "", "p2", false),
+			Entry("returns true when e2 package name is missing", "p1", "", true),
+			Entry("returns true when e2 package name is >= e1 package name", "p1", "p2", true),
 		)
 		DescribeTable(propertyOLMChannel, func(e1Channel string, e2Channel string, expReturn bool) {
 			e1Map := map[string]string{propertyOLMDefaultChannel: "c2", propertyOLMPackageName: "p"}
@@ -440,9 +431,9 @@ var _ = Describe("Constraints", func() {
 			e2 := entitysource.NewEntity("e2", e2Map)
 			Expect(byChannelAndVersion(e1, e2)).To(Equal(expReturn))
 		},
-			Entry("Returns false when e1 channel is missing", "", "", false),
-			Entry("Returns true when e2 channel is missing", "c1", "", true),
-			Entry("Returns e1 channel < e2 channel when e1 and e2 channels do not match their respective defaults", "c1", "c2", true),
+			Entry("returns false when e1 channel is missing", "", "c2", false),
+			Entry("returns true when e2 channel is missing", "c1", "", true),
+			Entry("returns e1 channel < e2 channel when e1 and e2 channels do not match their respective defaults", "c1", "c2", true),
 		)
 		DescribeTable(propertyOLMDefaultChannel, func(e1DefaultChannel string, e2DefaultChannel string, expReturn bool) {
 			e1Map := map[string]string{propertyOLMChannel: "c1", propertyOLMPackageName: "p"}
@@ -457,10 +448,10 @@ var _ = Describe("Constraints", func() {
 			e2 := entitysource.NewEntity("e2", e2Map)
 			Expect(byChannelAndVersion(e1, e2)).To(Equal(expReturn))
 		},
-			Entry("Returns e1channel < e2Channel when e1 default channel is missing", "", "", true),
-			Entry("Returns e1channel < e2Channel when e2 default channel is missing", "c1", "", true),
-			Entry("Returns true when e1 channel == e1 default channel", "c1", "c2", true),
-			Entry("Returns false when e2 channel == e2 default channel", "c2", "c2", false),
+			Entry("returns e1 channel < e2 channel when e1 default channel is missing", "", "c2", true),
+			Entry("returns e1 channel < e2 channel when e2 default channel is missing", "c1", "", true),
+			Entry("returns true when e1 channel == e1 default channel", "c1", "c2", true),
+			Entry("returns false when e2 channel == e2 default channel", "c2", "c2", false),
 		)
 		DescribeTable(propertyOLMVersion, func(e1version string, e2version string, expReturn bool) {
 			e1Map := map[string]string{propertyOLMChannel: "c1", propertyOLMPackageName: "p"}
@@ -475,26 +466,11 @@ var _ = Describe("Constraints", func() {
 			e2 := entitysource.NewEntity("e2", e2Map)
 			Expect(byChannelAndVersion(e1, e2)).To(Equal(expReturn))
 		},
-			Entry("Returns false when e1 version is missing", "", "", false),
-			Entry("Returns true when e2 version is missing", "1.0.0", "", true),
-			Entry("Returns false when e1 version does not parse", "abcd", "2.0.0", false),
-			Entry("Returns false when e2 version does not parse", "2.0.0", "abcd", false),
-			Entry("Returns e1 version > e2 version when both are provided and parse correctly", "2.0.0", "1.0.0", true),
+			Entry("returns false when e1 version is missing", "", "2.0.0", false),
+			Entry("returns true when e2 version is missing", "1.0.0", "", true),
+			Entry("returns false when e1 version does not parse", "abcd", "2.0.0", false),
+			Entry("returns false when e2 version does not parse", "2.0.0", "abcd", false),
+			Entry("returns e1 version > e2 version when both are provided and parse correctly", "2.0.0", "1.0.0", true),
 		)
-	})
-	Context("entity helper funcs", func() {
-		Describe("subject", func() {
-			It("does stuff", func() {
-
-			})
-		})
-		Describe("toSatIdentifier", func() {
-			var ()
-			BeforeEach(func() {
-
-			})
-			It("does stuff", func() {
-			})
-		})
 	})
 })
