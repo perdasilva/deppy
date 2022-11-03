@@ -422,10 +422,10 @@ var _ = Describe("Constraints", func() {
 			e1Map := map[string]string{propertyOLMDefaultChannel: "c2", propertyOLMPackageName: "p"}
 			e2Map := map[string]string{propertyOLMDefaultChannel: "c1", propertyOLMPackageName: "p"}
 			if e1Channel != "" {
-				e1Map[propertyOLMPackageName] = e1Channel
+				e1Map[propertyOLMChannel] = e1Channel
 			}
 			if e2Channel != "" {
-				e2Map[propertyOLMPackageName] = e2Channel
+				e2Map[propertyOLMChannel] = e2Channel
 			}
 			e1 := entitysource.NewEntity("e1", e1Map)
 			e2 := entitysource.NewEntity("e2", e2Map)
@@ -448,7 +448,7 @@ var _ = Describe("Constraints", func() {
 			e2 := entitysource.NewEntity("e2", e2Map)
 			Expect(byChannelAndVersion(e1, e2)).To(Equal(expReturn))
 		},
-			Entry("returns e1 channel < e2 channel when e1 default channel is missing", "", "c2", true),
+			Entry("returns e1 channel < e2 channel when e1 default channel is missing", "", "", true),
 			Entry("returns e1 channel < e2 channel when e2 default channel is missing", "c1", "", true),
 			Entry("returns true when e1 channel == e1 default channel", "c1", "c2", true),
 			Entry("returns false when e2 channel == e2 default channel", "c2", "c2", false),
@@ -472,5 +472,28 @@ var _ = Describe("Constraints", func() {
 			Entry("returns false when e2 version does not parse", "2.0.0", "abcd", false),
 			Entry("returns e1 version > e2 version when both are provided and parse correctly", "2.0.0", "1.0.0", true),
 		)
+	})
+	Context("sat.Identifier helper funcs", func() {
+		Describe("subject", func() {
+			It("concatenates a string slice with '-' into a sat.Identifier", func() {
+				strs := []string{
+					"my", "collection", "of", "string",
+				}
+				ret := subject(strs...)
+				Expect(ret).To(Equal(sat.Identifier("my-collection-of-string")))
+			})
+		})
+		Describe("toSatIdentifier", func() {
+			It("converts an EntityID slice into a slice of sat.Identifier", func() {
+				ids := []entitysource.EntityID{
+					"my", "collection", "of", "entities",
+				}
+				ret := toSatIdentifier(ids...)
+				Expect(ret).To(HaveLen(len(ids)))
+				for i, id := range ret {
+					Expect(id.String()).To(Equal(string(ids[i])))
+				}
+			})
+		})
 	})
 })
