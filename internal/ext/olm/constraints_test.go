@@ -1,16 +1,20 @@
-package olm
+package olm_test
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	. "github.com/onsi/gomega/gstruct"
+
 	"github.com/operator-framework/deppy/internal/entitysource"
-	"github.com/operator-framework/deppy/internal/sat"
+	"github.com/operator-framework/deppy/internal/ext/olm"
 )
 
 func TestConstraints(t *testing.T) {
@@ -18,32 +22,83 @@ func TestConstraints(t *testing.T) {
 	RunSpecs(t, "Constraints Suite")
 }
 
+const (
+	propertyOLMGVK            = "olm.gvk"
+	propertyOLMPackageName    = "olm.packageName"
+	propertyOLMVersion        = "olm.version"
+	propertyOLMChannel        = "olm.channel"
+	propertyOLMDefaultChannel = "olm.defaultChannel"
+)
+
+func defaultTestEntityList() entitysource.EntityList {
+	return entitysource.EntityList{
+		*entitysource.NewEntity("cool-package-1-entity", map[string]string{
+			propertyOLMPackageName: "cool-package-1",
+			propertyOLMVersion:     "2.0.1",
+			propertyOLMChannel:     "channel-1",
+			propertyOLMGVK:         "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
+		}),
+		*entitysource.NewEntity("cool-package-2-0-entity", map[string]string{
+			propertyOLMPackageName: "cool-package-2",
+			propertyOLMVersion:     "2.0.3",
+			propertyOLMChannel:     "channel-1",
+			propertyOLMGVK:         "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
+		}),
+		*entitysource.NewEntity("cool-package-2-1-entity", map[string]string{
+			propertyOLMPackageName: "cool-package-2",
+			propertyOLMVersion:     "2.1.0",
+			propertyOLMChannel:     "channel-1",
+			propertyOLMGVK:         "{\"group\":\"my-other-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
+		}),
+		*entitysource.NewEntity("cool-package-3-entity", map[string]string{
+			propertyOLMPackageName: "cool-package-3",
+			propertyOLMVersion:     "3.1.2",
+			propertyOLMChannel:     "channel-2",
+			propertyOLMGVK:         "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
+		}),
+	}
+}
+
 // MockQuerier type to mock the entity querier
 type MockQuerier struct {
-	returnError         bool
-	errorString         string
-	entityListReturn    entitysource.EntityList
-	entityListMapReturn entitysource.EntityListMap
+	testError      error
+	testEntityList entitysource.EntityList
 }
 
 func (t MockQuerier) Get(ctx context.Context, id entitysource.EntityID) *entitysource.Entity {
 	return &entitysource.Entity{}
 }
 func (t MockQuerier) Filter(ctx context.Context, filter entitysource.Predicate) (entitysource.EntityList, error) {
-	if t.returnError {
-		return nil, errors.New(t.errorString)
+	if t.testError != nil {
+		return nil, t.testError
 	}
-	return t.entityListReturn, nil
+	ret := entitysource.EntityList{}
+	for _, entity := range t.testEntityList {
+		if filter(&entity) {
+			ret = append(ret, entity)
+		}
+	}
+	return ret, nil
 }
 func (t MockQuerier) GroupBy(ctx context.Context, id entitysource.GroupByFunction) (entitysource.EntityListMap, error) {
-	if t.returnError {
-		return nil, errors.New(t.errorString)
+	if t.testError != nil {
+		return nil, t.testError
 	}
-	return t.entityListMapReturn, nil
+	ret := entitysource.EntityListMap{}
+	for _, entity := range t.testEntityList {
+		keys := id(&entity)
+		for _, key := range keys {
+			if _, ok := ret[key]; !ok {
+				ret[key] = entitysource.EntityList{}
+			}
+			ret[key] = append(ret[key], entity)
+		}
+	}
+	return ret, nil
 }
 func (t MockQuerier) Iterate(ctx context.Context, id entitysource.IteratorFunction) error {
-	if t.returnError {
-		return errors.New(t.errorString)
+	if t.testError != nil {
+		return t.testError
 	}
 	return nil
 }
@@ -53,273 +108,286 @@ var _ = Describe("Constraints", func() {
 		Describe("GetVariables", func() {
 			var (
 				ctx         context.Context
-				reqPkg      requirePackage
 				mockQuerier MockQuerier
 			)
 			BeforeEach(func() {
 				ctx = context.Background()
-				reqPkg = requirePackage{
-					packageName:  "cool-package-1",
-					versionRange: "1.0-2.0",
-					channel:      "my-channel",
-				}
 				mockQuerier = MockQuerier{
-					returnError: false,
+					testError:      nil,
+					testEntityList: defaultTestEntityList(),
 				}
 			})
-			It("returns a slice of sat.Variable containing requirement on entity", func() {
-				mockQuerier.entityListReturn = entitysource.EntityList{
-					*entitysource.NewEntity("cool-package-2-entity", map[string]string{
-						propertyOLMPackageName: "cool-package-2",
+			// match all
+			It("returns one satVar entry describing the required package", func() {
+				satVars, err := olm.RequirePackage("cool-package-1", "<=2.0.2", "channel-1").GetVariables(ctx, mockQuerier)
+				expectedIdentifier := fmt.Sprintf("require-%s-%s-%s", "cool-package-1", "<=2.0.2", "channel-1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Identifier().String()).To(Equal(expectedIdentifier))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[0].String("test-pkg")).To(Equal("test-pkg is mandatory"))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg requires at least one of cool-package-1-entity"))
+			})
+			// package name
+			It("finds no candidates to satisfy the dependency when package name does not match any entities", func() {
+				satVars, err := olm.RequirePackage("cool-package-4", "<3.0.0", "channel-1").GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg has a dependency without any candidates to satisfy it"))
+			})
+			It("finds no candidates to satisfy the dependency when no entries contain the 'olm.packageName' key", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-3-entity", map[string]string{
+						"wrong-key":        "cool-package-1",
+						propertyOLMVersion: "2.1.2",
+						propertyOLMChannel: "channel-1",
 					}),
 				}
-				vars, err := reqPkg.GetVariables(ctx, mockQuerier)
-				expectedIdentifier := fmt.Sprintf("require-%s-%s-%s", reqPkg.packageName, reqPkg.versionRange, reqPkg.channel)
+				satVars, err := olm.RequirePackage("cool-package-4", "<=3.0.0", "channel-3").GetVariables(ctx, mockQuerier)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(vars).Should(HaveLen(1))
-				Expect(vars[0].Identifier().String()).To(Equal(expectedIdentifier))
-				Expect(vars[0].Constraints()).Should(HaveLen(2))
-				Expect(vars[0].Constraints()[0].String(sat.IdentifierFromString(expectedIdentifier))).To(
-					Equal(fmt.Sprintf("%s is mandatory", expectedIdentifier)))
-				Expect(vars[0].Constraints()[1].String(sat.IdentifierFromString(expectedIdentifier))).To(
-					Equal(fmt.Sprintf("%s requires at least one of cool-package-2-entity", expectedIdentifier)))
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg has a dependency without any candidates to satisfy it"))
 			})
-			It("forwards any errors from EntityQuerier", func() {
-				mockQuerier = MockQuerier{
-					returnError: true,
-					errorString: "filter failure",
+			// version range
+			It("finds no candidates to satisfy the dependency when no entries match the provided version range", func() {
+				satVars, err := olm.RequirePackage("cool-package-1", "<=2.0.0", "channel-1").GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg has a dependency without any candidates to satisfy it"))
+			})
+			It("finds no candidates to satisfy the dependency when given an invalid version range", func() {
+				satVars, err := olm.RequirePackage("cool-package-1", "abcdefg", "channel-1").GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg has a dependency without any candidates to satisfy it"))
+			})
+			It("finds no candidates to satisfy the dependency when no entries have a valid semver value", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-1-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-1",
+						propertyOLMVersion:     "abcdefg",
+						propertyOLMChannel:     "channel-1",
+					}),
 				}
-				vars, err := reqPkg.GetVariables(ctx, mockQuerier)
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("filter failure"))
-				Expect(vars).Should(HaveLen(0))
-			})
-		})
-		Describe("RequirePackage", func() {
-			var (
-				ctx         context.Context
-				mockQuerier MockQuerier
-			)
-			It("returns constraint generator with values properly set", func() {
-				expPackageName := "my-package"
-				expVersionRange := "1.1.1-2.2.2"
-				expChannel := "my-channel"
-				reqPkg := RequirePackage(expPackageName, expVersionRange, expChannel)
-				vars, err := reqPkg.GetVariables(ctx, mockQuerier)
+				satVars, err := olm.RequirePackage("cool-package-1", ">=3.0.0", "channel-1").GetVariables(ctx, mockQuerier)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(vars).Should(HaveLen(1))
-				Expect(vars[0].Identifier().String()).To(Equal(fmt.Sprintf("require-%s-%s-%s", expPackageName, expVersionRange, expChannel)))
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg has a dependency without any candidates to satisfy it"))
+			})
+			It("finds no candidates to satisfy the dependency when no entries contain the 'olm.version' key", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-1-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-1",
+						"wrong-key":            "2.1.2",
+						propertyOLMChannel:     "channel-1",
+					}),
+				}
+				satVars, err := olm.RequirePackage("cool-package-1", "<=3.0.0", "channel-3").GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg has a dependency without any candidates to satisfy it"))
+			})
+			// channel
+			It("returns one satVar entry describing no possible dependency candidates when the entry has an empty channel name", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-1-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-1",
+						propertyOLMVersion:     "2.1.2",
+						propertyOLMChannel:     "",
+					}),
+				}
+				satVars, err := olm.RequirePackage("cool-package-1", "<=3.0.0", "channel-3").GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg has a dependency without any candidates to satisfy it"))
+			})
+			It("returns one satVar entry describing dependency candidate when channel requirement is empty", func() {
+				satVars, err := olm.RequirePackage("cool-package-1", "<=3.0.0", "").GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg requires at least one of cool-package-1-entity"))
+			})
+			It("returns one satVar entry describing no possible dependency candidates when no entries match the provided channel", func() {
+				satVars, err := olm.RequirePackage("cool-package-1", "<=3.0.0", "channel-3").GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg has a dependency without any candidates to satisfy it"))
+			})
+			It("returns one satVar entry describing no possible dependency candidates when no entries contain the 'olm.channel' key", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-1-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-1",
+						propertyOLMVersion:     "2.1.2",
+						"wrong-key":            "channel-1",
+					}),
+				}
+				satVars, err := olm.RequirePackage("cool-package-1", "<=3.0.0", "channel-1").GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Constraints()).Should(HaveLen(2))
+				Expect(satVars[0].Constraints()[1].String("test-pkg")).To(Equal("test-pkg has a dependency without any candidates to satisfy it"))
+			})
+			// entity querier error
+			It("forwards any error encountered by the entity querier", func() {
+				mockQuerier.testError = errors.New("oh no!")
+				satVars, err := olm.RequirePackage("cool-package-1", "<=3.0.0", "channel-1").GetVariables(ctx, mockQuerier)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(Equal("oh no!"))
+				Expect(satVars).Should(HaveLen(0))
 			})
 		})
 	})
 	Context("uniqueness", func() {
-		Describe("GetVariables", func() {
+		Describe("PackageUniqueness", func() {
 			var (
-				ctx           context.Context
-				mockQuerier   MockQuerier
-				entityListMap entitysource.EntityListMap
+				ctx         context.Context
+				mockQuerier MockQuerier
 			)
 			BeforeEach(func() {
 				ctx = context.Background()
 				mockQuerier = MockQuerier{
-					returnError: false,
+					testError:      nil,
+					testEntityList: defaultTestEntityList(),
 				}
-				entityListMap = entitysource.EntityListMap{
-					"entity-list-1": entitysource.EntityList{
-						*entitysource.NewEntity("entity-1", map[string]string{
-							propertyOLMGVK:         "gvk-1",
-							propertyOLMPackageName: "package-2",
-						}),
-					},
-					"entity-list-2": entitysource.EntityList{
-						*entitysource.NewEntity("entity-2", map[string]string{
-							propertyOLMGVK:         "gvk-2",
-							propertyOLMPackageName: "package-1",
-						}),
-					},
-				}
-				mockQuerier.entityListMapReturn = entityListMap
 			})
-			It("returns a slice of sat.Variable containing uniqueness requirements", func() {
-				vars, err := GVKUniqueness().GetVariables(ctx, mockQuerier)
+			It("returns a slice of sat.Variable grouped by package name", func() {
+				satVars, err := olm.PackageUniqueness().GetVariables(ctx, mockQuerier)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(vars).Should(HaveLen(len(entityListMap)))
-				// Not necessarily returned in order - sort for consistency
-				sort.Slice(vars, func(i, j int) bool {
-					return vars[i].Identifier().String() < vars[j].Identifier().String()
+				Expect(satVars).Should(HaveLen(3))
+				sort.Slice(satVars, func(i, j int) bool {
+					return satVars[i].Identifier().String() < satVars[j].Identifier().String()
 				})
-				Expect(vars[0].Identifier().String()).To(Equal("entity-list-1 uniqueness"))
-				Expect(vars[0].Constraints()[0].String("custom-entity")).To(Equal("custom-entity permits at most 1 of entity-1"))
-				Expect(vars[1].Identifier().String()).To(Equal("entity-list-2 uniqueness"))
-				Expect(vars[1].Constraints()[0].String("custom-entity")).To(Equal("custom-entity permits at most 1 of entity-2"))
+				Expect(satVars[0].Identifier().String()).To(Equal("cool-package-1 uniqueness"))
+				Expect(satVars[0].Constraints()[0].String("test-pkg")).To(Equal("test-pkg permits at most 1 of cool-package-1-entity"))
+				Expect(satVars[1].Identifier().String()).To(Equal("cool-package-2 uniqueness"))
+				Expect(satVars[1].Constraints()[0].String("test-pkg")).To(Equal("test-pkg permits at most 1 of cool-package-2-1-entity, cool-package-2-0-entity"))
+				Expect(satVars[2].Identifier().String()).To(Equal("cool-package-3 uniqueness"))
+				Expect(satVars[2].Constraints()[0].String("test-pkg")).To(Equal("test-pkg permits at most 1 of cool-package-3-entity"))
 			})
-			It("forwards any errors from EntityQuerier", func() {
-				mockQuerier = MockQuerier{
-					returnError: true,
-					errorString: "groupBy failure",
-				}
-				vars, err := PackageUniqueness().GetVariables(ctx, mockQuerier)
+			It("forwards any error given by the entity querier", func() {
+				mockQuerier.testError = errors.New("oh no!")
+				satVars, err := olm.PackageUniqueness().GetVariables(ctx, mockQuerier)
 				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("groupBy failure"))
-				Expect(vars).Should(HaveLen(0))
+				Expect(err.Error()).To(Equal("oh no!"))
+				Expect(satVars).Should(HaveLen(0))
+			})
+			It("returns an empty sat.Variable slice when package name key is missing from all entities", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-3-entity", map[string]string{
+						"wrong-key":        "cool-package-3",
+						propertyOLMVersion: "3.1.2",
+						propertyOLMChannel: "channel-2",
+					}),
+				}
+				satVars, err := olm.PackageUniqueness().GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(0))
 			})
 		})
-		DescribeTable("gvkGroupFunction", func(gvkJson string, gvkKey string, expReturn []string) {
-			entity := entitysource.NewEntity(
-				"my-entity",
-				map[string]string{
-					gvkKey: gvkJson,
-				},
-			)
-			ret := gvkGroupFunction(entity)
-			Expect(ret).Should(HaveLen(len(expReturn)))
-			for i, gvk := range ret {
-				Expect(gvk).To(Equal(expReturn[i]))
-			}
-		},
-			Entry("returns a string slice with an entry containing the group, version, and kind delimited by '/'",
-				"{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
-				propertyOLMGVK,
-				[]string{"my-group/my-version/my-kind"},
-			),
-			Entry("returns nothing and does not panic when gvk passed is not parseable as json",
-				"what will come back I wonder",
-				propertyOLMGVK,
-				[]string{},
-			),
-			Entry("returns nothing when 'olm.gvk' key is missing",
-				"{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
-				"irrelevant-key",
-				[]string{},
-			),
-		)
-		DescribeTable("packageGroupFunction", func(packageName string, packageKey string, expReturn []string) {
-			entity := entitysource.NewEntity(
-				"my-entity",
-				map[string]string{
-					packageKey: packageName,
-				},
-			)
-			ret := packageGroupFunction(entity)
-			Expect(ret).Should(HaveLen(len(expReturn)))
-			for i, pkg := range ret {
-				Expect(pkg).To(Equal(expReturn[i]))
-			}
-		},
-			Entry("returns a string slice containing a single entry with the package name", "my-cool-package", propertyOLMPackageName, []string{"my-cool-package"}),
-			Entry("returns an empty string slice when 'olm.packageName' key is missing", "my-cool-package", "irrelevant-key", []string{}),
-		)
-	})
-	Context("packageDependency", func() {
-		Describe("GetVariables", func() {
+		Describe("GVKUniqueness", func() {
 			var (
-				ctx          context.Context
-				filterReturn entitysource.EntityList
-				pkgDep       packageDependency
-				mockQuerier  MockQuerier
+				ctx         context.Context
+				mockQuerier MockQuerier
 			)
 			BeforeEach(func() {
 				ctx = context.Background()
-				pkgDep = packageDependency{
-					subject:      "my-subject",
-					packageName:  "cool-package-1",
-					versionRange: "1.0-2.0",
-				}
-				filterReturn = entitysource.EntityList{
-					*entitysource.NewEntity(
-						"entity-1",
-						map[string]string{
-							"?": "!",
-						},
-					),
-				}
 				mockQuerier = MockQuerier{
-					returnError:      false,
-					entityListReturn: filterReturn,
+					testError:      nil,
+					testEntityList: defaultTestEntityList(),
 				}
 			})
-			It("returns a slice of sat.Variable containing package dependency", func() {
-				vars, err := pkgDep.GetVariables(ctx, mockQuerier)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(vars).To(HaveLen(1))
-				Expect(vars[0].Identifier().String()).To(Equal("my-subject"))
-				Expect(vars[0].Constraints()[0].String("foo")).To(Equal("foo requires at least one of entity-1"))
+			It("returns a slice of sat.Variable grouped by group, version, and kind, with constraints ordered by package name", func() {
+				satVars, err := olm.GVKUniqueness().GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(2))
+				sort.Slice(satVars, func(i, j int) bool {
+					return satVars[i].Identifier().String() < satVars[j].Identifier().String()
+				})
+				Expect(satVars[0].Identifier().String()).To(Equal("my-group/my-version/my-kind uniqueness"))
+				Expect(satVars[0].Constraints()[0].String("foo")).To(Equal("foo permits at most 1 of cool-package-1-entity, cool-package-2-0-entity, cool-package-3-entity"))
+				Expect(satVars[1].Identifier().String()).To(Equal("my-other-group/my-version/my-kind uniqueness"))
+				Expect(satVars[1].Constraints()[0].String("foo")).To(Equal("foo permits at most 1 of cool-package-2-1-entity"))
 			})
-			It("forwards any error from the entity querier", func() {
-				mockQuerier = MockQuerier{
-					returnError: true,
-					errorString: "filter failure",
-				}
-				vars, err := pkgDep.GetVariables(ctx, mockQuerier)
+			It("forwards any error given by the entity querier", func() {
+				mockQuerier.testError = errors.New("oh no!")
+				satVars, err := olm.GVKUniqueness().GetVariables(ctx, mockQuerier)
 				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("filter failure"))
-				Expect(vars).To(HaveLen(0))
+				Expect(err.Error()).To(Equal("oh no!"))
+				Expect(satVars).Should(HaveLen(0))
+			})
+			It("returns an empty sat.Variable slice when gvk key is missing from all entities", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-3-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-3",
+						"wrong-key":            "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
+					}),
+				}
+				satVars, err := olm.GVKUniqueness().GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(0))
+			})
+			It("returns an empty sat.Variable slice when gvk field is malformed in all entities", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-3-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-3",
+						propertyOLMGVK:         "abcdefg",
+					}),
+				}
+				satVars, err := olm.GVKUniqueness().GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(0))
+			})
+			It("does not panic but returns a constraint with '//' id when gvk json is missing fields", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-3-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-3",
+						propertyOLMGVK:         "{}",
+					}),
+				}
+				satVars, err := olm.GVKUniqueness().GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Identifier().String()).To(Equal("// uniqueness"))
 			})
 		})
+	})
+	Context("dependency", func() {
 		Describe("PackageDependency", func() {
 			var (
 				ctx         context.Context
 				mockQuerier MockQuerier
 			)
-			It("constructs a packageDependency object with the provided values", func() {
-				expSubject := "my-subject"
-				expPackageName := "cool-package-1"
-				expVersionRange := "1.1.1-2.2.2"
-				pkgDep := PackageDependency(sat.Identifier(expSubject), expPackageName, expVersionRange)
-
-				vars, err := pkgDep.GetVariables(ctx, mockQuerier)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(vars).Should(HaveLen(1))
-				Expect(vars[0]).NotTo(BeNil())
-				Expect(vars[0].Identifier().String()).To(Equal(expSubject))
-			})
-		})
-	})
-	Context("gvkDependency", func() {
-		Describe("GetVariables", func() {
-			var (
-				ctx          context.Context
-				mockQuerier  MockQuerier
-				filterReturn entitysource.EntityList
-				gvkDep       gvkDependency
-			)
 			BeforeEach(func() {
 				ctx = context.Background()
-				filterReturn = entitysource.EntityList{
-					*entitysource.NewEntity(
-						"entity-1",
-						map[string]string{
-							"foo": "bar",
-						},
-					),
-				}
-				gvkDep = gvkDependency{
-					subject: "my-subject",
-					group:   "my-group",
-					version: "3.4",
-					kind:    "my-kind",
-				}
 				mockQuerier = MockQuerier{
-					returnError:      false,
-					entityListReturn: filterReturn,
+					testError:      nil,
+					testEntityList: defaultTestEntityList(),
 				}
 			})
-			It("returns a slice of sat.Variable containing the gvk dependency", func() {
-				vars, err := gvkDep.GetVariables(ctx, mockQuerier)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(vars).To(HaveLen(1))
-				Expect(vars[0].Identifier().String()).To(Equal("my-subject"))
-				Expect(vars[0].Constraints()[0].String("a-package")).To(Equal("a-package requires at least one of entity-1"))
+			It("returns one satVar containing an constraint which lists all available dependencies", func() {
+				satVars, err := olm.PackageDependency("cool-package-2-dep", "cool-package-2", "<=3.0.2").GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Identifier().String()).To(Equal("cool-package-2-dep"))
+				Expect(satVars[0].Constraints()).Should(HaveLen(1))
+				msg := satVars[0].Constraints()[0].String("test-pkg")
+				Expect(msg).To(Equal("test-pkg requires at least one of cool-package-2-1-entity, cool-package-2-0-entity"))
 			})
-			It("forwards any error from the entity querier", func() {
-				mockQuerier = MockQuerier{
-					returnError: true,
-					errorString: "filter failure",
-				}
-				vars, err := gvkDep.GetVariables(ctx, mockQuerier)
+			It("forwards any error encountered by the entity querier", func() {
+				mockQuerier.testError = errors.New("oh no!")
+				satVars, err := olm.PackageDependency("cool-package-1-dep", "cool-package-1", ">1.0.0").GetVariables(ctx, mockQuerier)
 				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("filter failure"))
-				Expect(vars).To(HaveLen(0))
+				Expect(err.Error()).To(Equal("oh no!"))
+				Expect(satVars).Should(HaveLen(0))
 			})
 		})
 		Describe("GVKDependency", func() {
@@ -327,172 +395,147 @@ var _ = Describe("Constraints", func() {
 				ctx         context.Context
 				mockQuerier MockQuerier
 			)
-			It("properly constructs a gvkDependency struct with provided values", func() {
-				expSubject := "my-subject"
-				expGroup := "my-group"
-				expVersion := "1.1.1"
-				expKind := "my-kind"
-				gvkDep := GVKDependency(sat.Identifier(expSubject), expGroup, expVersion, expKind)
-				vars, err := gvkDep.GetVariables(ctx, mockQuerier)
+			BeforeEach(func() {
+				ctx = context.Background()
+				mockQuerier = MockQuerier{
+					testError:      nil,
+					testEntityList: defaultTestEntityList(),
+				}
+			})
+			It("returns a single satVar which lists all available dependencies based on gvk", func() {
+				satVars, err := olm.GVKDependency("cool-package-2-dep", "my-group", "my-version", "my-kind").GetVariables(ctx, mockQuerier)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(vars).Should(HaveLen(1))
-				Expect(vars[0]).NotTo(BeNil())
-				Expect(vars[0].Identifier().String()).To(Equal(expSubject))
+				Expect(satVars).Should(HaveLen(1))
+				Expect(satVars[0].Identifier().String()).To(Equal("cool-package-2-dep"))
+				Expect(satVars[0].Constraints()).Should(HaveLen(1))
+				msg := satVars[0].Constraints()[0].String("test-pkg")
+				Expect(msg).To(Equal("test-pkg requires at least one of cool-package-1-entity, cool-package-2-0-entity, cool-package-3-entity"))
+			})
+			It("forwards any error encountered by the entity querier", func() {
+				mockQuerier.testError = errors.New("oh no!")
+				satVars, err := olm.GVKDependency("cool-package-2-dep", "my-group", "my-version", "my-kind").GetVariables(ctx, mockQuerier)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(Equal("oh no!"))
+				Expect(satVars).Should(HaveLen(0))
 			})
 		})
-	})
-	Context("entitySource Predicates", func() {
-		DescribeTable("withPackageName", func(packageName string, packageNameKey string, expReturn bool) {
-			propertiesMap := map[string]string{
-				packageNameKey: "my-package",
-			}
-			entity := entitysource.NewEntity("e1", propertiesMap)
-			pred := withPackageName(packageName)
-			result := pred(entity)
-			Expect(result).To(Equal(expReturn))
-		},
-			Entry("gives true result when package name matches value set on 'olm.packageName'", "my-package", propertyOLMPackageName, true),
-			Entry("gives false result when package name does not match value set on 'olm.packageName'", "my-other-package", propertyOLMPackageName, false),
-			Entry("gives false result when 'olm.packageName' key is missing", "my-package", "irrelevant-key", false),
-		)
-		DescribeTable("withinVersion", func(entityVersion string, semverRange string, key string, expReturn bool) {
-			propertiesMap := map[string]string{
-				key: entityVersion,
-			}
-			entity := entitysource.NewEntity("e1", propertiesMap)
-			pred := withinVersion(semverRange)
-			result := pred(entity)
-			Expect(result).To(Equal(expReturn))
-		},
-			Entry("gives true result when given a valid version within the specified range", "3.22.1", "<3.22.2", propertyOLMVersion, true),
-			Entry("give false result when given a valid version outside the specified range", "3.22.3", "<3.22.2", propertyOLMVersion, false),
-			Entry("give false result when given an invalid version", "abcdefg", "<3.22.2", propertyOLMVersion, false),
-			Entry("give false result when given an invalid version range", "3.22.1", "abcdefg", propertyOLMVersion, false),
-			Entry("give false result when 'olm.version' key is missing from entity", "3.22.1", "<3.22.2", "irrelevent-key", false),
-		)
-		DescribeTable("withChannel", func(channel string, channelKey string, expReturn bool) {
-			propertiesMap := map[string]string{
-				channelKey: "a-channel",
-			}
-			entity := entitysource.NewEntity("e1", propertiesMap)
-			pred := withChannel(channel)
-			result := pred(entity)
-			Expect(result).To(Equal(expReturn))
-		},
-			Entry("gives true result when provided channel matches value set on 'olm.channel'", "a-channel", propertyOLMChannel, true),
-			Entry("gives false result when provided channel does not match value set on 'olm.channel'", "b-channel", propertyOLMChannel, false),
-			Entry("gives true result when provided with empty channel", "", propertyOLMChannel, true),
-			Entry("gives false result when 'olm.channel' key is missing from entity", "a-channel", "irrelevant-key", false),
-		)
-		DescribeTable("withExportsGVK", func(group string, version string, kind string, gvkKey string, expReturn bool) {
-			propertiesMap := map[string]string{
-				gvkKey: "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
-			}
-			entity := entitysource.NewEntity("e1", propertiesMap)
-			pred := withExportsGVK(group, version, kind)
-			result := pred(entity)
-			Expect(result).To(Equal(expReturn))
-		},
-			Entry("gives true result when provided group, version, and kind match that in the entity json", "my-group", "my-version", "my-kind", propertyOLMGVK, true),
-			Entry("gives false result when group does not match that in entity json", "my-other-group", "my-version", "my-kind", propertyOLMGVK, false),
-			Entry("gives false result when version does not match that in entity json", "my-group", "my-other-version", "my-kind", propertyOLMGVK, false),
-			Entry("gives false result when kind does not match that in entity json", "my-group", "my-version", "my-other-kind", propertyOLMGVK, false),
-			Entry("gives false result when 'olm.gvk' key is missing from entity", "my-group", "my-version", "my-kind", "irrelevant-key", false),
-		)
 	})
 	Context("byChannelAndVersion", func() {
-		DescribeTable(propertyOLMPackageName, func(e1pkgName string, e2pkgName string, expReturn bool) {
-			e1Map := make(map[string]string)
-			e2Map := make(map[string]string)
-			if e1pkgName != "" {
-				e1Map[propertyOLMPackageName] = e1pkgName
-			}
-			if e2pkgName != "" {
-				e2Map[propertyOLMPackageName] = e2pkgName
-			}
-			e1 := entitysource.NewEntity("e1", e1Map)
-			e2 := entitysource.NewEntity("e2", e2Map)
-			Expect(byChannelAndVersion(e1, e2)).To(Equal(expReturn))
-		},
-			Entry("returns false when e1 package name is missing", "", "p2", false),
-			Entry("returns true when e2 package name is missing", "p1", "", true),
-			Entry("returns true when e2 package name is >= e1 package name", "p1", "p2", true),
+		var (
+			ctx         context.Context
+			mockQuerier MockQuerier
 		)
-		DescribeTable(propertyOLMChannel, func(e1Channel string, e2Channel string, expReturn bool) {
-			e1Map := map[string]string{propertyOLMDefaultChannel: "c2", propertyOLMPackageName: "p"}
-			e2Map := map[string]string{propertyOLMDefaultChannel: "c1", propertyOLMPackageName: "p"}
-			if e1Channel != "" {
-				e1Map[propertyOLMChannel] = e1Channel
+		BeforeEach(func() {
+			ctx = context.Background()
+			mockQuerier = MockQuerier{
+				testError: nil,
 			}
-			if e2Channel != "" {
-				e2Map[propertyOLMChannel] = e2Channel
-			}
-			e1 := entitysource.NewEntity("e1", e1Map)
-			e2 := entitysource.NewEntity("e2", e2Map)
-			Expect(byChannelAndVersion(e1, e2)).To(Equal(expReturn))
-		},
-			Entry("returns false when e1 channel is missing", "", "c2", false),
-			Entry("returns true when e2 channel is missing", "c1", "", true),
-			Entry("returns e1 channel < e2 channel when e1 and e2 channels do not match their respective defaults", "c1", "c2", true),
-		)
-		DescribeTable(propertyOLMDefaultChannel, func(e1DefaultChannel string, e2DefaultChannel string, expReturn bool) {
-			e1Map := map[string]string{propertyOLMChannel: "c1", propertyOLMPackageName: "p"}
-			e2Map := map[string]string{propertyOLMChannel: "c2", propertyOLMPackageName: "p"}
-			if e1DefaultChannel != "" {
-				e1Map[propertyOLMDefaultChannel] = e1DefaultChannel
-			}
-			if e2DefaultChannel != "" {
-				e2Map[propertyOLMDefaultChannel] = e2DefaultChannel
-			}
-			e1 := entitysource.NewEntity("e1", e1Map)
-			e2 := entitysource.NewEntity("e2", e2Map)
-			Expect(byChannelAndVersion(e1, e2)).To(Equal(expReturn))
-		},
-			Entry("returns e1 channel < e2 channel when e1 default channel is missing", "", "", true),
-			Entry("returns e1 channel < e2 channel when e2 default channel is missing", "c1", "", true),
-			Entry("returns true when e1 channel == e1 default channel", "c1", "c2", true),
-			Entry("returns false when e2 channel == e2 default channel", "c2", "c2", false),
-		)
-		DescribeTable(propertyOLMVersion, func(e1version string, e2version string, expReturn bool) {
-			e1Map := map[string]string{propertyOLMChannel: "c1", propertyOLMPackageName: "p"}
-			e2Map := map[string]string{propertyOLMChannel: "c1", propertyOLMPackageName: "p"}
-			if e1version != "" {
-				e1Map[propertyOLMVersion] = e1version
-			}
-			if e2version != "" {
-				e2Map[propertyOLMVersion] = e2version
-			}
-			e1 := entitysource.NewEntity("e1", e1Map)
-			e2 := entitysource.NewEntity("e2", e2Map)
-			Expect(byChannelAndVersion(e1, e2)).To(Equal(expReturn))
-		},
-			Entry("returns false when e1 version is missing", "", "2.0.0", false),
-			Entry("returns true when e2 version is missing", "1.0.0", "", true),
-			Entry("returns false when e1 version does not parse", "abcd", "2.0.0", false),
-			Entry("returns false when e2 version does not parse", "2.0.0", "abcd", false),
-			Entry("returns e1 version > e2 version when both are provided and parse correctly", "2.0.0", "1.0.0", true),
-		)
-	})
-	Context("sat.Identifier helper funcs", func() {
-		Describe("subject", func() {
-			It("concatenates a string slice with '-' into a sat.Identifier", func() {
-				strs := []string{
-					"my", "collection", "of", "string",
-				}
-				ret := subject(strs...)
-				Expect(ret).To(Equal(sat.Identifier("my-collection-of-string")))
-			})
 		})
-		Describe("toSatIdentifier", func() {
-			It("converts an EntityID slice into a slice of sat.Identifier", func() {
-				ids := []entitysource.EntityID{
-					"my", "collection", "of", "entities",
+		DescribeTable("package name ordering", func(pkg1NameKey string, pkg2NameKey string, matchElements Elements) {
+			mockQuerier.testEntityList = entitysource.EntityList{
+				*entitysource.NewEntity("cool-package-entity-1", map[string]string{
+					pkg1NameKey:               "cool-package-1",
+					propertyOLMChannel:        "channel-1",
+					propertyOLMGVK:            "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
+					propertyOLMDefaultChannel: "channel-1",
+				}),
+				*entitysource.NewEntity("cool-package-entity-2", map[string]string{
+					pkg2NameKey:               "cool-package-2",
+					propertyOLMChannel:        "channel-1",
+					propertyOLMGVK:            "{\"group\":\"my-group\",\"version\":\"my-version\",\"kind\":\"my-kind\"}",
+					propertyOLMDefaultChannel: "channel-1",
+				}),
+			}
+			satVars, err := olm.GVKUniqueness().GetVariables(ctx, mockQuerier)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(satVars).Should(HaveLen(1))
+			entities := strings.Split(satVars[0].Constraints()[0].String("pkg"), ", ")
+			Expect(entities).To(MatchAllElementsWithIndex(IndexIdentity, matchElements))
+		},
+			Entry("orders by packageName when both keys exist", propertyOLMPackageName, propertyOLMPackageName, Elements{
+				"0": Equal("pkg permits at most 1 of cool-package-entity-1"),
+				"1": Equal("cool-package-entity-2"),
+			}),
+			Entry("orders with entity-2 first when entity-1 is missing packageName", "wrong-key", propertyOLMPackageName, Elements{
+				"0": Equal("pkg permits at most 1 of cool-package-entity-2"),
+				"1": Equal("cool-package-entity-1"),
+			}),
+			Entry("orders with entity-1 first when entity-2 is missing packageName", propertyOLMPackageName, "wrong-key", Elements{
+				"0": Equal("pkg permits at most 1 of cool-package-entity-1"),
+				"1": Equal("cool-package-entity-2"),
+			}),
+		)
+		Describe("channel and version ordering", func() {
+			It("orders sat vars with identical packageName by channel and version in that order of priority", func() {
+				mockQuerier.testEntityList = entitysource.EntityList{
+					*entitysource.NewEntity("cool-package-1-ch1-1.0-entity", map[string]string{
+						propertyOLMPackageName:    "cool-package-1",
+						propertyOLMVersion:        "1.0.1",
+						propertyOLMChannel:        "channel-1",
+						propertyOLMDefaultChannel: "channel-1",
+					}),
+					*entitysource.NewEntity("cool-package-1-ch1-invalid-version-a-entity", map[string]string{
+						propertyOLMPackageName:    "cool-package-1",
+						propertyOLMVersion:        "abcdefg",
+						propertyOLMChannel:        "channel-1",
+						propertyOLMDefaultChannel: "channel-1",
+					}),
+					*entitysource.NewEntity("cool-package-1-ch2-versionless-entity", map[string]string{
+						propertyOLMPackageName:    "cool-package-1",
+						propertyOLMChannel:        "channel-2",
+						propertyOLMDefaultChannel: "channel-1",
+					}),
+					*entitysource.NewEntity("cool-package-1-ch1-1.1-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-1",
+						propertyOLMVersion:     "1.1.3",
+						propertyOLMChannel:     "channel-1",
+					}),
+					*entitysource.NewEntity("cool-package-1-ch1-invalid-version-b-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-1",
+						propertyOLMVersion:     "abcdefg",
+						propertyOLMChannel:     "channel-1",
+					}),
+					*entitysource.NewEntity("cool-package-1-ch2-1.2-entity", map[string]string{
+						propertyOLMPackageName:    "cool-package-1",
+						propertyOLMVersion:        "1.2.3",
+						propertyOLMChannel:        "channel-2",
+						propertyOLMDefaultChannel: "channel-1",
+					}),
+					*entitysource.NewEntity("cool-package-1-ch3-1.2-entity", map[string]string{
+						propertyOLMPackageName:    "cool-package-1",
+						propertyOLMVersion:        "1.2.3",
+						propertyOLMChannel:        "channel-3",
+						propertyOLMDefaultChannel: "channel-2",
+					}),
+					*entitysource.NewEntity("cool-package-1-channelless-1.1-entity", map[string]string{
+						propertyOLMPackageName: "cool-package-1",
+						propertyOLMVersion:     "1.1.3",
+					}),
+					*entitysource.NewEntity("cool-package-1-ch1-versionless-entity", map[string]string{
+						propertyOLMPackageName:    "cool-package-1",
+						propertyOLMChannel:        "channel-1",
+						propertyOLMDefaultChannel: "channel-1",
+					}),
 				}
-				ret := toSatIdentifier(ids...)
-				Expect(ret).To(HaveLen(len(ids)))
-				for i, id := range ret {
-					Expect(id.String()).To(Equal(string(ids[i])))
-				}
+				satVars, err := olm.PackageUniqueness().GetVariables(ctx, mockQuerier)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(satVars).Should(HaveLen(1))
+				entities := strings.Split(satVars[0].Constraints()[0].String("pkg"), ", ")
+				Expect(entities).To(MatchAllElementsWithIndex(IndexIdentity, Elements{
+					// channel-1 first, ordered by version, versionless last
+					"0": Equal("pkg permits at most 1 of cool-package-1-ch1-1.0-entity"),
+					"1": Equal("cool-package-1-ch1-invalid-version-a-entity"),
+					"2": Equal("cool-package-1-ch1-1.1-entity"),
+					"3": Equal("cool-package-1-ch1-invalid-version-b-entity"),
+					"4": Equal("cool-package-1-ch1-versionless-entity"),
+					// channel-2 second, ordered by version, versionless last
+					"5": Equal("cool-package-1-ch2-1.2-entity"),
+					"6": Equal("cool-package-1-ch2-versionless-entity"),
+					// channel-3 third
+					"7": Equal("cool-package-1-ch3-1.2-entity"),
+					// channelless last
+					"8": Equal("cool-package-1-channelless-1.1-entity"),
+				}))
 			})
 		})
 	})
