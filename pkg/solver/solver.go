@@ -22,6 +22,8 @@ type Solver interface {
 	Solve(ctx context.Context) (Solution, error)
 }
 
+var _ Solver = &DeppySolver{}
+
 // DeppySolver is a simple solver implementation that takes an entity source group and a constraint aggregator
 // to produce a Solution (or error if no solution can be found)
 type DeppySolver struct {

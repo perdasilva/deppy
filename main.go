@@ -20,6 +20,10 @@ import (
 	"flag"
 	"os"
 
+	"github.com/operator-framework/deppy/pkg/constraints"
+	"github.com/operator-framework/deppy/pkg/entitysource"
+	"github.com/operator-framework/deppy/pkg/solver"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -86,4 +90,6 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+
+	_, _ = solver.NewDeppySolver(entitysource.NewGroup(), constraints.NewConstraintAggregator())
 }
