@@ -17,12 +17,15 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
 	"github.com/operator-framework/deppy/pkg/constraints"
 	"github.com/operator-framework/deppy/pkg/entitysource"
+	"github.com/operator-framework/deppy/pkg/sat"
 	"github.com/operator-framework/deppy/pkg/solver"
+	"github.com/operator-framework/deppy/pkg/v2"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -92,4 +95,55 @@ func main() {
 	}
 
 	_, _ = solver.NewDeppySolver(entitysource.NewGroup(), constraints.NewConstraintAggregator())
+	_, _ = v2.NewDeppySolver[*V2Entity, V2Variable, *V2EntitySource](&V2EntitySource{}, &V2VariableSource{})
+}
+
+var _ sat.Variable = &V2Variable{}
+
+type V2Variable struct {
+}
+
+func (v V2Variable) Identifier() sat.Identifier {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (v V2Variable) Constraints() []sat.Constraint {
+	//TODO implement me
+	panic("implement me")
+}
+
+var _ v2.Entity = &V2Entity{}
+
+type V2Entity struct {
+}
+
+func (v V2Entity) ID() v2.EntityID {
+	//TODO implement me
+	panic("implement me")
+}
+
+var _ v2.EntitySource[*V2Entity] = &V2EntitySource{}
+
+type V2EntitySource struct {
+}
+
+func (v V2EntitySource) ID() v2.EntitySourceID {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (v V2EntitySource) Get(ctx context.Context, id v2.EntityID) (*V2Entity, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+var _ v2.VariableSource[*V2Entity, V2Variable, *V2EntitySource] = &V2VariableSource{}
+
+type V2VariableSource struct {
+}
+
+func (v V2VariableSource) GetVariables(ctx context.Context, source *V2EntitySource) ([]V2Variable, error) {
+	//TODO implement me
+	panic("implement me")
 }

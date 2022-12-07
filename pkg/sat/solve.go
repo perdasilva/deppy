@@ -138,6 +138,18 @@ func WithInput(input []Variable) Option {
 	}
 }
 
+func WithGenericIntput[V Variable](input []V) Option {
+	return func(s *solver) error {
+		var err error
+		convertedInput := make([]Variable, len(input))
+		for index := range input {
+			convertedInput[index] = input[index]
+		}
+		s.litMap, err = newLitMapping(convertedInput)
+		return err
+	}
+}
+
 func WithTracer(t Tracer) Option {
 	return func(s *solver) error {
 		s.tracer = t
