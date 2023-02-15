@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"strconv"
 	"time"
 
 	"github.com/operator-framework/deppy/pkg/deppy"
@@ -12,11 +11,9 @@ import (
 	"github.com/operator-framework/deppy/pkg/deppy/input"
 )
 
-var _ input.EntitySource = &Sudoku{}
 var _ input.VariableSource = &Sudoku{}
 
 type Sudoku struct {
-	*input.CacheEntitySource
 }
 
 func GetID(row int, col int, num int) deppy.Identifier {
@@ -27,27 +24,12 @@ func GetID(row int, col int, num int) deppy.Identifier {
 }
 
 func NewSudoku() *Sudoku {
-	var entities = make(map[deppy.Identifier]input.Entity, 9*9*9)
-	for row := 0; row < 9; row++ {
-		for col := 0; col < 9; col++ {
-			for num := 0; num < 9; num++ {
-				id := GetID(row, col, num)
-				entities[id] = *input.NewEntity(id, map[string]string{
-					"row": strconv.Itoa(row),
-					"col": strconv.Itoa(col),
-					"num": strconv.Itoa(num),
-				})
-			}
-		}
-	}
-	return &Sudoku{
-		CacheEntitySource: input.NewCacheQuerier(entities),
-	}
+	return &Sudoku{}
 }
 
-func (s Sudoku) GetVariables(ctx context.Context, _ input.EntitySource) ([]deppy.Variable, error) {
+func (s Sudoku) GetVariables(_ context.Context) ([]deppy.Variable, error) {
 	// adapted from: https://github.com/go-air/gini/blob/871d828a26852598db2b88f436549634ba9533ff/sudoku_test.go#L10
-	variables := make(map[deppy.Identifier]*input.SimpleVariable, 0)
+	variables := make(map[deppy.Identifier]*input.Variable, 0)
 	inorder := make([]deppy.Variable, 0)
 	rand.Seed(time.Now().UnixNano())
 
@@ -55,7 +37,7 @@ func (s Sudoku) GetVariables(ctx context.Context, _ input.EntitySource) ([]deppy
 	for row := 0; row < 9; row++ {
 		for col := 0; col < 9; col++ {
 			for n := 0; n < 9; n++ {
-				variable := input.NewSimpleVariable(GetID(row, col, n))
+				variable := input.NewVariable(GetID(row, col, n))
 				variables[variable.Identifier()] = variable
 				inorder = append(inorder, variable)
 			}
@@ -74,7 +56,7 @@ func (s Sudoku) GetVariables(ctx context.Context, _ input.EntitySource) ([]deppy
 
 			// create clause that the particular position has a number
 			varID := deppy.Identifier(fmt.Sprintf("%d-%d has a number", row, col))
-			variable := input.NewSimpleVariable(varID, constraint.Mandatory(), constraint.Dependency(ids...))
+			variable := input.NewVariable(varID, constraint.Mandatory(), constraint.Dependency(ids...))
 			variables[varID] = variable
 			inorder = append(inorder, variable)
 		}

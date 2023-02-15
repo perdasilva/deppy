@@ -6,32 +6,31 @@ import (
 	"github.com/operator-framework/deppy/pkg/deppy"
 )
 
-// VariableSource generates solver constraints given an entity querier interface
 type VariableSource interface {
-	GetVariables(ctx context.Context, entitySource EntitySource) ([]deppy.Variable, error)
+	GetVariables(ctx context.Context) ([]deppy.Variable, error)
 }
 
-var _ deppy.Variable = &SimpleVariable{}
+var _ deppy.Variable = &Variable{}
 
-type SimpleVariable struct {
+type Variable struct {
 	id          deppy.Identifier
 	constraints []deppy.Constraint
 }
 
-func (s *SimpleVariable) Identifier() deppy.Identifier {
+func (s *Variable) Identifier() deppy.Identifier {
 	return s.id
 }
 
-func (s *SimpleVariable) Constraints() []deppy.Constraint {
+func (s *Variable) Constraints() []deppy.Constraint {
 	return s.constraints
 }
 
-func (s *SimpleVariable) AddConstraint(constraint deppy.Constraint) {
+func (s *Variable) AddConstraint(constraint deppy.Constraint) {
 	s.constraints = append(s.constraints, constraint)
 }
 
-func NewSimpleVariable(id deppy.Identifier, constraints ...deppy.Constraint) *SimpleVariable {
-	return &SimpleVariable{
+func NewVariable(id deppy.Identifier, constraints ...deppy.Constraint) *Variable {
+	return &Variable{
 		id:          id,
 		constraints: constraints,
 	}
